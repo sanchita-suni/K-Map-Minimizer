@@ -46,7 +46,7 @@ The application features a modern frontend built with React and a high-performan
 
 ```bash
 # Navigate to the backend directory
-cd backend/kmap-backend
+cd backend
 
 # Create a virtual environment
 python -m venv venv
@@ -63,7 +63,7 @@ uvicorn server:app --reload
 
 ```bash
 # Navigate to the frontend directory
-cd frontend/kmap-frontend
+cd frontend
 
 # Install dependencies
 npm install
