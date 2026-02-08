@@ -1,0 +1,47 @@
+# IDE/Editor specific files
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Dependency directories
+node_modules/
+/frontend/kmap-frontend/node_modules/
+
+# Python virtual environment
+/backend/kmap-backend/venv/
+venv/
+env/
+.env
+
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+/frontend/kmap-frontend/build/
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+# These files should not be committed to version control.
+# Create a .env.example file with the required variables.
+.env
+.env.*
+/backend/kmap-backend/.env
+/frontend/kmap-frontend/.env
+
+# Test output
+coverage/
+.pytest_cache/
+.nyc_output/
