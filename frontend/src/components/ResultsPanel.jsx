@@ -7,12 +7,13 @@ import LogicDiagram from "./LogicDiagram";
 
 
 export default function ResultsPanel({ results, varNames, numVars }) {
+  const outName = results.output_name || "F";
   return (
     <div className="space-y-6">
 
       {/* Expression Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        
+
         {/* SOP */}
         <Card className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl shadow-lg p-6 border-2 border-emerald-300">
           <div className="flex items-center gap-3 mb-4">
@@ -25,13 +26,13 @@ export default function ResultsPanel({ results, varNames, numVars }) {
             <div className="bg-white rounded-lg p-4 border border-emerald-200">
               <p className="text-xs font-semibold text-slate-600 mb-1">Canonical Form:</p>
               <p className="text-lg font-bold font-mono" data-testid="canonical-sop">
-                F = {results.canonical_sop}
+                {outName} = {results.canonical_sop}
               </p>
             </div>
             <div className="bg-white rounded-lg p-4 border border-emerald-200">
               <p className="text-xs font-semibold text-slate-600 mb-1">Minimal Form:</p>
               <p className="text-xl font-bold text-emerald-700 font-mono" data-testid="minimal-sop">
-                F = {results.minimal_sop}
+                {outName} = {results.minimal_sop}
               </p>
             </div>
           </div>
@@ -49,13 +50,13 @@ export default function ResultsPanel({ results, varNames, numVars }) {
             <div className="bg-white rounded-lg p-4 border border-blue-200">
               <p className="text-xs font-semibold text-slate-600 mb-1">Canonical Form:</p>
               <p className="text-lg font-bold font-mono" data-testid="canonical-pos">
-                F = {results.canonical_pos}
+                {outName} = {results.canonical_pos}
               </p>
             </div>
             <div className="bg-white rounded-lg p-4 border border-blue-200">
               <p className="text-xs font-semibold text-slate-600 mb-1">Minimal Form:</p>
               <p className="text-xl font-bold text-blue-700 font-mono" data-testid="minimal-pos">
-                F = {results.minimal_pos}
+                {outName} = {results.minimal_pos}
               </p>
             </div>
           </div>
@@ -120,7 +121,7 @@ export default function ResultsPanel({ results, varNames, numVars }) {
                     {varNames.slice(0, numVars).map((name) => (
                       <th key={name} className="px-4 py-2 text-left font-semibold">{name}</th>
                     ))}
-                    <th className="px-4 py-2 text-left font-semibold">F</th>
+                    <th className="px-4 py-2 text-left font-semibold">{outName}</th>
                     <th className="px-4 py-2 text-left font-semibold">Minterm</th>
                   </tr>
                 </thead>
@@ -131,7 +132,7 @@ export default function ResultsPanel({ results, varNames, numVars }) {
                         <td key={name} className="px-4 py-2 font-mono">{row[name]}</td>
                       ))}
                       <td className="px-4 py-2 font-bold font-mono">
-                        {row.F}
+                        {row[outName]}
                       </td>
                       <td className="px-4 py-2 font-mono">{row.minterm}</td>
                     </tr>
@@ -192,7 +193,7 @@ export default function ResultsPanel({ results, varNames, numVars }) {
         <TabsContent value="logic-diagram">
           <Card className="bg-white rounded-xl shadow-md p-6">
             <h3 className="text-xl font-semibold text-slate-800 mb-4">
-               Logic Diagram (from Minimal SOP)
+              Logic Diagram (from Minimal SOP)
             </h3>
 
             {/* Remove "F =" before passing */}

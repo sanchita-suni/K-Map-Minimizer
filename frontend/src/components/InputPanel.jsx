@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Card } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Label } from "../components/ui/label";
@@ -26,6 +26,22 @@ export default function InputPanel({
   onMinimize,
   loading,
 }) {
+  // Raw text states for controlled inputs
+  const [mintermText, setMintermText] = useState(minterms.join(", "));
+  const [maxtermText, setMaxtermText] = useState(maxterms.join(", "));
+  const [dontCareText, setDontCareText] = useState(dontCares.join(", "));
+
+  // Sync raw text when arrays are reset externally (e.g. mode/var change)
+  useEffect(() => {
+    if (minterms.length === 0) setMintermText("");
+  }, [minterms]);
+  useEffect(() => {
+    if (maxterms.length === 0) setMaxtermText("");
+  }, [maxterms]);
+  useEffect(() => {
+    if (dontCares.length === 0) setDontCareText("");
+  }, [dontCares]);
+
   const parseNumbers = (value, maxValue) => {
     const nums = value
       .split(",")
@@ -37,16 +53,19 @@ export default function InputPanel({
   };
 
   const handleMintermChange = (e) => {
+    setMintermText(e.target.value);
     const nums = parseNumbers(e.target.value, 2 ** numVars);
     setMinterms(nums);
   };
 
   const handleMaxtermChange = (e) => {
+    setMaxtermText(e.target.value);
     const nums = parseNumbers(e.target.value, 2 ** numVars);
     setMaxterms(nums);
   };
 
   const handleDontCareChange = (e) => {
+    setDontCareText(e.target.value);
     const nums = parseNumbers(e.target.value, 2 ** numVars);
     setDontCares(nums);
   };
@@ -158,7 +177,7 @@ export default function InputPanel({
           <Input
             type="text"
             placeholder="e.g., 0, 2, 5, 7"
-            defaultValue={minterms.join(", ")}
+            value={mintermText}
             onChange={handleMintermChange}
             className="input-field border-emerald-300 focus:border-emerald-500"
           />
@@ -172,7 +191,7 @@ export default function InputPanel({
           <Input
             type="text"
             placeholder="e.g., 1, 3, 4, 6"
-            defaultValue={maxterms.join(", ")}
+            value={maxtermText}
             onChange={handleMaxtermChange}
             className="input-field border-emerald-300 focus:border-emerald-500"
           />
@@ -186,7 +205,7 @@ export default function InputPanel({
           <Input
             type="text"
             placeholder="e.g., 1, 4"
-            defaultValue={dontCares.join(", ")}
+            value={dontCareText}
             onChange={handleDontCareChange}
             className="input-field border-emerald-300 focus:border-emerald-500"
           />

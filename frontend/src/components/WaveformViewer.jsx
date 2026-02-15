@@ -1,12 +1,16 @@
 import React from "react";
 import { Card } from "../components/ui/card";
 
-export default function WaveformViewer({ waveformData, varNames, numVars }) {
+export default function WaveformViewer({ waveformData, varNames, numVars, outputName }) {
   if (!waveformData || !waveformData.signals) {
     return <div>No waveform data available</div>;
   }
 
-  const { signals, time_steps, signal_names } = waveformData;
+  const { signals, signal_names } = waveformData;
+  // Cap time steps to prevent SVG explosion (backend already caps at 32,
+  // but guard against older/uncapped responses)
+  const maxSteps = 32;
+  const time_steps = Math.min(waveformData.time_steps || 0, maxSteps);
   const cellWidth = 60;
   const rowHeight = 50;
   const labelWidth = 80;
@@ -61,7 +65,7 @@ export default function WaveformViewer({ waveformData, varNames, numVars }) {
           {/* Waveforms */}
           {signal_names.map((signal, signalIdx) => {
             const yBase = 60 + signalIdx * rowHeight + rowHeight / 2;
-            const values = signals[signal];
+            const values = (signals[signal] || []).slice(0, time_steps);
 
             return (
               <g key={signal}>
@@ -71,7 +75,7 @@ export default function WaveformViewer({ waveformData, varNames, numVars }) {
                   y={yBase + 5}
                   fontSize="14"
                   fontWeight="bold"
-                  fill={signal === 'F' ? '#10b981' : '#60a5fa'}
+                  fill={signal === (outputName || 'F') ? '#10b981' : '#60a5fa'}
                 >
                   {signal}
                 </text>
@@ -112,7 +116,7 @@ export default function WaveformViewer({ waveformData, varNames, numVars }) {
                         y1={y}
                         x2={nextX}
                         y2={y}
-                        stroke={signal === 'F' ? '#10b981' : '#60a5fa'}
+                        stroke={signal === (outputName || 'F') ? '#10b981' : '#60a5fa'}
                         strokeWidth="2"
                       />
                       {/* Vertical transition */}
@@ -122,7 +126,7 @@ export default function WaveformViewer({ waveformData, varNames, numVars }) {
                           y1={y}
                           x2={nextX}
                           y2={nextY}
-                          stroke={signal === 'F' ? '#10b981' : '#60a5fa'}
+                          stroke={signal === (outputName || 'F') ? '#10b981' : '#60a5fa'}
                           strokeWidth="2"
                         />
                       )}
@@ -148,7 +152,7 @@ export default function WaveformViewer({ waveformData, varNames, numVars }) {
       <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
         <p className="text-sm text-slate-700">
           <strong>Waveform Legend:</strong> Blue signals are inputs ({varNames.slice(0, numVars).join(", ")}),
-          Green signal is output (F). Time progresses from left to right.
+          Green signal is output ({outputName || 'F'}). Time progresses from left to right.
         </p>
       </div>
     </Card>

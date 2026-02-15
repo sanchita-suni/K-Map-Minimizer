@@ -1,0 +1,23 @@
+﻿python :   File "<string>", 
+line 11
+At line:1 char:1
++ python -c "
++ ~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (  Fil  
+  e "<string>", line 11:S   
+ tring) [], RemoteExcept    
+ion
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+    tests.append(('5var 
+0-7=AB', d['minimal_sop'], 
+'PASS' if d['minimal_sop'] 
+== " AB\
+                            
+                            
+                         ^
+SyntaxError: unterminated 
+string literal (detected at 
+line 11)

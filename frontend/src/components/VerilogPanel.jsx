@@ -58,7 +58,7 @@ const CodeBlock = ({ code, title, testId }) => {
   );
 };
 
-export default function VerilogPanel({ results, varNames, numVars }) {
+export default function VerilogPanel({ results, varNames, numVars, outputName }) {
   return (
     <div className="space-y-6">
       <Tabs defaultValue="behavioral" className="space-y-4">
@@ -160,10 +160,11 @@ export default function VerilogPanel({ results, varNames, numVars }) {
         </TabsContent>
 
         <TabsContent value="gtkwave">
-          <WaveformViewer 
+          <WaveformViewer
             waveformData={results.waveform_data}
             varNames={varNames}
             numVars={numVars}
+            outputName={outputName}
           />
         </TabsContent>
       </Tabs>

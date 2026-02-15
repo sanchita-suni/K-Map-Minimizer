@@ -1,0 +1,45 @@
+﻿=== Test 1: 3 vars, minterms [0,2,5,7] ===
+  Expression: F = A'C' + AC
+  PIs: [('0-0', [0, 2]), ('1-1', [5, 7])]
+  PASS: All 4 minterms covered by 2 PIs
+
+=== Test 2: 4 vars, minterms [0,1,2,5,6,7,8,9,14] ===
+  Expression: F = BCD' + B'C' + A'BD + A'B'D'
+  Total PIs: 7, Selected: 4
+  PASS: All 9 minterms covered by 4 PIs
+
+=== Test 3: 4 vars, minterms [1,3,5,7], dont_cares [0,2] ===
+  Expression: F = A'D
+  PASS: All 4 minterms covered by 1 PIs
+
+=== Test 4: term_to_expression compatibility ===
+  '10-' -> AB'
+  '0-0' -> A'C'
+  '---' -> 1
+  PASS
+
+=== Test 5: 8 vars performance (80 minterms) ===
+  Time: 124.69ms
+  PIs: 60, Selected: 38
+  PASS: All 80 minterms covered by 38 PIs
+
+=== Test 6: 10 vars performance (200 minterms) ===
+  Time: 3.54ms
+  PIs: 176, Selected: 117
+  PASS: All 200 minterms covered by 117 PIs
+
+=== Test 7: All minterms (F=1) ===
+  Expression: F = 1
+  PASS
+
+=== Test 8: Single minterm ===
+  Expression: F = AB'C
+  PASS: All 1 minterms covered by 1 PIs
+
+=== Test 9: No minterms ===
+  Expression: F = 0
+  PASS
+
+==================================================
+ALL TESTS PASSED
+==================================================

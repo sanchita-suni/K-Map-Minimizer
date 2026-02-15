@@ -13,7 +13,8 @@ const LIT_SPACING = 50;
 const parseSOP = (sop) => {
   const clean = sop.replace(/\s+/g, "");
   if (!clean) return { terms: [] };
-  const terms = clean.split("+").map(t => t.match(/[A-Z]'?/g) || []);
+  // Match multi-character variable names (letters+digits) optionally followed by '
+  const terms = clean.split("+").map(t => t.match(/[A-Z][A-Z0-9]*'?/g) || []);
   return { terms };
 };
 
@@ -21,21 +22,21 @@ const NotGate = ({ x, y }) => {
   return (
     <>
       {/* Triangle body */}
-      <Line 
-        points={[x, y, x + 40, y + GATE_H / 2, x, y + GATE_H, x, y]} 
-        closed 
+      <Line
+        points={[x, y, x + 40, y + GATE_H / 2, x, y + GATE_H, x, y]}
+        closed
         fill="white"
-        stroke="black" 
+        stroke="black"
         strokeWidth={2}
         lineJoin="miter"
       />
       {/* Inversion bubble */}
-      <Circle 
-        x={x + 46} 
-        y={y + GATE_H / 2} 
-        radius={6} 
+      <Circle
+        x={x + 46}
+        y={y + GATE_H / 2}
+        radius={6}
         fill="white"
-        stroke="black" 
+        stroke="black"
         strokeWidth={2}
       />
     </>
@@ -44,14 +45,14 @@ const NotGate = ({ x, y }) => {
 
 const AndGate = ({ x, y }) => {
   const height = GATE_H;
-  const rectWidth = 3; 
+  const rectWidth = 3;
   const centerY = y + height / 2;
   const radius = height / 2;
-  
+
   // Create perfect D-shape using arc
   const arcPoints = [];
   const numPoints = 20;
-  
+
   // Generate semicircle points from top to bottom
   for (let i = 0; i <= numPoints; i++) {
     const angle = (Math.PI * i) / numPoints - Math.PI / 2; // -90° to +90°
@@ -59,7 +60,7 @@ const AndGate = ({ x, y }) => {
     const py = centerY + radius * Math.sin(angle);
     arcPoints.push(px, py);
   }
-  
+
   const points = [
     x, y,                    // Top left corner
     x + rectWidth, y,        // Top right corner (start of curve)
@@ -68,7 +69,7 @@ const AndGate = ({ x, y }) => {
     x, y + height,           // Bottom left corner
     x, y                     // Back to start
   ];
-  
+
   return (
     <Line
       points={points}
@@ -85,32 +86,32 @@ const OrGate = ({ x, y }) => {
   const width = 52;
   const height = GATE_H;
   const centerY = y + height / 2;
-  
+
   // Highly refined OR gate with sharp tip and smooth curves
   const points = [
     x, y,                                    // Top back start
-    x + 6, y + height * 0.12,               
-    x + 9, y + height * 0.25,               
-    x + 11, y + height * 0.38,              
+    x + 6, y + height * 0.12,
+    x + 9, y + height * 0.25,
+    x + 11, y + height * 0.38,
     x + 11, centerY,                         // Back deepest point
-    x + 11, y + height * 0.62,              
-    x + 9, y + height * 0.75,               
-    x + 6, y + height * 0.88,               
+    x + 11, y + height * 0.62,
+    x + 9, y + height * 0.75,
+    x + 6, y + height * 0.88,
     x, y + height,                           // Bottom back end
     x + width * 0.3, y + height,            // Bottom curve start
-    x + width * 0.5, y + height * 0.92,     
-    x + width * 0.65, y + height * 0.82,    
-    x + width * 0.78, y + height * 0.68,    
-    x + width * 0.9, y + height * 0.55,     
+    x + width * 0.5, y + height * 0.92,
+    x + width * 0.65, y + height * 0.82,
+    x + width * 0.78, y + height * 0.68,
+    x + width * 0.9, y + height * 0.55,
     x + width, centerY,                      // Sharp tip point
-    x + width * 0.9, y + height * 0.45,     
-    x + width * 0.78, y + height * 0.32,    
-    x + width * 0.65, y + height * 0.18,    
-    x + width * 0.5, y + height * 0.08,     
+    x + width * 0.9, y + height * 0.45,
+    x + width * 0.78, y + height * 0.32,
+    x + width * 0.65, y + height * 0.18,
+    x + width * 0.5, y + height * 0.08,
     x + width * 0.3, y,                     // Top curve start
     x, y                                     // Close
   ];
-  
+
   return (
     <Line
       points={points}
@@ -157,6 +158,19 @@ export default function LogicDiagram({ sop }) {
   if (!sop) return null;
 
   const clean = sop.replace(/\s+/g, "");
+  if (clean === "0") {
+    return (
+      <div style={{ marginTop: "20px" }}>
+        <Legend />
+        <Stage ref={stageRef} width={300} height={120}>
+          <Layer>
+            <Rect width={300} height={120} fill="white" />
+            <Text x={100} y={40} text="F = 0" fontSize={22} fontStyle="bold" />
+          </Layer>
+        </Stage>
+      </div>
+    );
+  }
   if (clean === "1") {
     return (
       <div style={{ marginTop: "20px" }}>
@@ -173,6 +187,30 @@ export default function LogicDiagram({ sop }) {
 
   const { terms } = parseSOP(sop);
   if (terms.length === 0) return null;
+
+  // Cap rendering for large expressions to prevent browser freeze
+  if (terms.length > 12) {
+    return (
+      <div style={{ marginTop: "20px" }}>
+        <Legend />
+        <div style={{
+          padding: "16px",
+          background: "#eff6ff",
+          borderRadius: "8px",
+          border: "1px solid #bfdbfe",
+          fontFamily: "monospace",
+          fontSize: "14px",
+        }}>
+          <p style={{ marginBottom: "8px", fontWeight: "bold", color: "#1e40af" }}>
+            Expression has {terms.length} product terms (diagram simplified)
+          </p>
+          <p style={{ color: "#334155", wordBreak: "break-all" }}>
+            F = {sop}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Special case: single literal only (non-complement) -> just show F = literal
   if (terms.length === 1 && terms[0].length === 1 && !terms[0][0].endsWith("'")) {

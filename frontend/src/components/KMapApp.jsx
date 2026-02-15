@@ -47,14 +47,20 @@ export default function KMapApp() {
         dont_cares: dontCares,
         expression: inputMode === "expression" ? expression : null,
         variable_names: varNames,
-      });
+      }, { timeout: 30000 });
 
       setResults(response.data);
       setActiveTab("kmap");
       toast.success("K-Map minimized successfully!");
     } catch (error) {
       console.error("Minimization error:", error);
-      toast.error(error.response?.data?.detail || "Minimization failed");
+      if (error.code === "ECONNABORTED") {
+        toast.error("Request timed out. Please try again.");
+      } else if (error.code === "ERR_NETWORK" || !error.response) {
+        toast.error("Cannot connect to backend. Make sure the server is running on " + (BACKEND_URL || "the configured URL") + ".");
+      } else {
+        toast.error(error.response?.data?.detail || "Minimization failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -176,8 +182,8 @@ export default function KMapApp() {
               <KMapVisualization
                 numVars={numVars}
                 varNames={varNames}
-                minterms={results.truth_table.filter(r => r.F === 1).map(r => r.minterm)}
-                dontCares={results.truth_table.filter(r => r.F === 'X').map(r => r.minterm)}
+                minterms={results.truth_table.filter(r => r[results.output_name || "F"] === 1).map(r => r.minterm)}
+                dontCares={results.truth_table.filter(r => r[results.output_name || "F"] === 'X').map(r => r.minterm)}
                 groups={results.groups}
               />
             )}
@@ -195,7 +201,7 @@ export default function KMapApp() {
 
           <TabsContent value="verilog">
             {results && (
-              <VerilogPanel results={results} varNames={varNames} numVars={numVars} />
+              <VerilogPanel results={results} varNames={varNames} numVars={numVars} outputName={results.output_name || "F"} />
             )}
           </TabsContent>
         </Tabs>

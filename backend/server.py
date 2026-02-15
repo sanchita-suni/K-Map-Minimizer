@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -16,13 +17,30 @@ import time
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# MongoDB connection (optional - not required for minimization)
+try:
+    mongo_url = os.environ.get('MONGO_URL', '')
+    if mongo_url:
+        client = AsyncIOMotorClient(mongo_url)
+        db = client[os.environ.get('DB_NAME', 'kmap_db')]
+    else:
+        client = None
+        db = None
+except Exception as e:
+    logging.warning(f"MongoDB connection not available: {e}")
+    client = None
+    db = None
 
-# Create the main app without a prefix
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(application):
+    # Startup
+    yield
+    # Shutdown
+    if client:
+        client.close()
+
+# Create the main app with lifespan handler
+app = FastAPI(lifespan=lifespan)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -54,7 +72,8 @@ class MinimizeResponse(BaseModel):
     simulation_output: str
     waveform_data: Dict[str, Any]
     steps: List[str]
-    performance_metrics: Dict[str, Any] = Field(default_factory=dict)  # New field for performance data
+    performance_metrics: Dict[str, Any] = Field(default_factory=dict)
+    output_name: str = "F"
 
 
 # Boolean Expression Parser
@@ -111,7 +130,11 @@ class BooleanExpressionParser:
             # Implicit AND (adjacent terms)
             eval_expr = re.sub(r'(\d)\s*\(', r'\1 and (', eval_expr)
             eval_expr = re.sub(r'\)\s*(\d)', r') and \1', eval_expr)
-            eval_expr = re.sub(r'(\d)\s+(\d)', r'\1 and \2', eval_expr)
+            eval_expr = re.sub(r'\)\s*\(', r') and (', eval_expr)
+            # Handle adjacent digits with optional whitespace (e.g., "10" -> "1 and 0")
+            # Apply iteratively since each replacement consumes a digit
+            while re.search(r'(\d)\s*(\d)', eval_expr):
+                eval_expr = re.sub(r'(\d)\s*(\d)', r'\1 and \2', eval_expr)
             
             # Evaluate
             result = eval(eval_expr)
@@ -140,11 +163,17 @@ class BitSliceQuineMcCluskey:
         self.all_terms = sorted(set(minterms + dont_cares))
         self.steps = []
         self.mask_full = (1 << num_vars) - 1  # All bits set for num_vars
+        # Index-based bitmask mapping: map term values to contiguous indices
+        # so coverage bitmasks stay compact (len(all_terms) bits, not 2^num_vars bits)
+        self.term_to_idx = {term: i for i, term in enumerate(self.all_terms)}
+        self.idx_to_term = list(self.all_terms)
+        self._time_start = time.perf_counter()
+        self._time_budget = 2.0  # seconds
 
     @staticmethod
     def popcount(n):
-        """Count number of 1 bits (hardware-accelerated on modern CPUs)"""
-        return bin(n).count('1')
+        """Count number of 1 bits (native C-level popcount on Python 3.10+)"""
+        return n.bit_count()
 
     @staticmethod
     def can_combine_bitwise(value1, mask1, value2, mask2):
@@ -215,7 +244,7 @@ class BitSliceQuineMcCluskey:
             ones = self.popcount(term)
             if ones not in current_level:
                 current_level[ones] = []
-            current_level[ones].append((term, 0, 1 << term))  # bitmask instead of frozenset
+            current_level[ones].append((term, 0, 1 << self.term_to_idx[term]))
 
         self.steps.append(f"Initial grouping by popcount: {len(current_level)} groups")
 
@@ -225,12 +254,26 @@ class BitSliceQuineMcCluskey:
         iteration = 0
         while current_level:
             iteration += 1
+            # Time budget check: stop combining and return current PIs
+            if self._is_over_budget():
+                self.steps.append("Time budget reached; returning current prime implicants")
+                for key in current_level:
+                    for value, mask, mints in current_level[key]:
+                        sig = (value, mask)
+                        if sig not in all_used:
+                            prime_implicants.append((value, mask, mints))
+                            all_used.add(sig)
+                break
             next_level_map = {}  # (value, mask) -> minterm_bitmask
             current_used = set()
 
             sorted_keys = sorted(current_level.keys())
+            budget_exceeded = False
 
             for i in range(len(sorted_keys) - 1):
+                if budget_exceeded or self._is_over_budget():
+                    budget_exceeded = True
+                    break
                 key1, key2 = sorted_keys[i], sorted_keys[i + 1]
 
                 for value1, mask1, mints1 in current_level[key1]:
@@ -259,6 +302,11 @@ class BitSliceQuineMcCluskey:
                         prime_implicants.append((value, mask, mints))
                         all_used.add(sig)
 
+            # If budget was exceeded mid-iteration, stop here
+            if budget_exceeded:
+                self.steps.append("Time budget reached mid-iteration; returning current prime implicants")
+                break
+
             # Rebuild grouped level
             next_level = {}
             for (value, mask), mints in next_level_map.items():
@@ -286,6 +334,41 @@ class BitSliceQuineMcCluskey:
             n ^= bit
         return result
 
+    def _is_over_budget(self):
+        """Check if computation has exceeded the time budget."""
+        return time.perf_counter() - self._time_start > self._time_budget
+
+    def bitmask_to_terms(self, bitmask):
+        """Convert an index-based bitmask back to actual term values."""
+        return [self.idx_to_term[idx] for idx in self._bitmask_to_list(bitmask)
+                if idx < len(self.idx_to_term)]
+
+    def _greedy_cover(self, essential_pis, remaining_pis, uncovered_bitmask):
+        """Greedy set-cover with time budget protection."""
+        selected = list(essential_pis)
+        remaining_uncovered = uncovered_bitmask
+        pool = list(remaining_pis)
+        while remaining_uncovered and pool:
+            if self._is_over_budget():
+                self.steps.append("Time budget reached during greedy cover")
+                break
+            best_pi = max(pool, key=lambda pi: self.popcount(pi[4] & remaining_uncovered))
+            if self.popcount(best_pi[4] & remaining_uncovered) == 0:
+                break
+            selected.append((best_pi[1], best_pi[2], best_pi[3]))
+            remaining_uncovered &= ~best_pi[4]
+            pool.remove(best_pi)
+        # Guarantee full coverage: add individual terms for any still-uncovered minterms
+        if remaining_uncovered:
+            count = 0
+            for idx in self._bitmask_to_list(remaining_uncovered):
+                if idx < len(self.idx_to_term):
+                    term = self.idx_to_term[idx]
+                    selected.append((term, 0, 1 << idx))
+                    count += 1
+            self.steps.append(f"Added {count} individual terms to guarantee full coverage")
+        return selected
+
     def find_minimal_cover_advanced(self, prime_implicants):
         """
         Advanced column covering using branch-and-bound with pruning.
@@ -299,9 +382,9 @@ class BitSliceQuineMcCluskey:
         # Build coverage: for each minterm, which PI indices cover it
         coverage = {mint: [] for mint in self.minterms}
         for i, (value, mask, mints_bitmask) in enumerate(prime_implicants):
-            for mint in self._bitmask_to_list(mints_bitmask):
-                if mint in coverage:
-                    coverage[mint].append(i)
+            for term in self.bitmask_to_terms(mints_bitmask):
+                if term in coverage:
+                    coverage[term].append(i)
 
         # Find essential prime implicants
         essential = set()
@@ -312,10 +395,10 @@ class BitSliceQuineMcCluskey:
         essential_pis = [prime_implicants[i] for i in essential]
         self.steps.append(f"Identified {len(essential_pis)} essential prime implicants")
 
-        # Build bitmask of all minterms to cover
+        # Build bitmask of all minterms to cover (index-based)
         minterm_bitmask = 0
         for m in self.minterms:
-            minterm_bitmask |= (1 << m)
+            minterm_bitmask |= (1 << self.term_to_idx[m])
 
         # Remove minterms covered by essentials
         covered_bitmask = 0
@@ -340,26 +423,22 @@ class BitSliceQuineMcCluskey:
         # Sort by coverage count (most covering first) for better pruning
         remaining_pis.sort(key=lambda pi: self.popcount(pi[4]), reverse=True)
 
-        # If problem is too large, use greedy
-        if len(remaining_pis) > 50 or uncovered_count > 30:
+        # If problem is too large or over budget, use greedy
+        if len(remaining_pis) > 30 or uncovered_count > 20 or self._is_over_budget():
             self.steps.append("Using greedy heuristic for large problem instance")
-            selected = list(essential_pis)
-            remaining_uncovered = uncovered_bitmask
+            return essential_pis, self._greedy_cover(essential_pis, remaining_pis, uncovered_bitmask)
 
-            while remaining_uncovered and remaining_pis:
-                best_pi = max(remaining_pis, key=lambda pi: self.popcount(pi[4] & remaining_uncovered))
-                selected.append((best_pi[1], best_pi[2], best_pi[3]))
-                remaining_uncovered &= ~best_pi[4]
-                remaining_pis.remove(best_pi)
-
-            return essential_pis, selected
-
-        # Branch and bound for optimal solution (all bitmask operations)
+        # Branch and bound for optimal solution with node limit
         best_solution = None
         best_size = float('inf')
+        nodes_explored = [0]
+        max_nodes = 50000
 
         def branch_and_bound(selected, remaining, uncov_bm, index):
             nonlocal best_solution, best_size
+            nodes_explored[0] += 1
+            if nodes_explored[0] > max_nodes:
+                return
 
             if len(selected) >= best_size:
                 return
@@ -400,7 +479,9 @@ class BitSliceQuineMcCluskey:
             self.steps.append(f"Found optimal cover with {len(final_selected)} prime implicants")
             return essential_pis, final_selected
 
-        return essential_pis, essential_pis
+        # B&B exhausted node limit without solution — fall back to greedy
+        self.steps.append("Branch-and-bound node limit reached; using greedy fallback")
+        return essential_pis, self._greedy_cover(essential_pis, remaining_pis, uncovered_bitmask)
 
     def term_to_expression(self, value_or_str, mask_or_varnames=None, var_names=None):
         """
@@ -448,20 +529,19 @@ class BitSliceQuineMcCluskey:
         ]
         expression = ' + '.join(expression_terms)
 
-        # Convert bitmask minterms to sorted lists for compatibility
-        max_term = 1 << self.num_vars
+        # Convert index-based bitmask minterms to sorted term value lists
         pi_list_compat = []
         for value, mask, mints_bm in prime_implicants:
             binary_str = self.implicant_to_binary(value, mask)
-            minterm_list = [m for m in self._bitmask_to_list(mints_bm) if m < max_term]
+            minterm_list = sorted(self.bitmask_to_terms(mints_bm))
             pi_list_compat.append((binary_str, minterm_list))
 
         essential_compat = [
-            (self.implicant_to_binary(v, m), [x for x in self._bitmask_to_list(mints_bm) if x < max_term])
+            (self.implicant_to_binary(v, m), sorted(self.bitmask_to_terms(mints_bm)))
             for v, m, mints_bm in essential_pis
         ]
         selected_compat = [
-            (self.implicant_to_binary(v, m), [x for x in self._bitmask_to_list(mints_bm) if x < max_term])
+            (self.implicant_to_binary(v, m), sorted(self.bitmask_to_terms(mints_bm)))
             for v, m, mints_bm in selected_pis
         ]
 
@@ -481,51 +561,103 @@ def maxterms_to_minterms(maxterms, num_vars):
     return sorted(minterms)
 
 
+# Maximum rows to include in truth table / waveform / simulation output
+_MAX_TABLE_ROWS = 256
+_MAX_WAVEFORM_STEPS = 32
+
+
 def generate_canonical_sop(minterms, num_vars, var_names):
-    """Generate canonical Sum of Products"""
+    """Generate canonical Sum of Products (capped for large problems)"""
     if not minterms:
         return "0"
     
+    cap = _MAX_TABLE_ROWS
     terms = []
-    for m in minterms:
+    for m in minterms[:cap]:
         binary = format(m, f'0{num_vars}b')
         term = ''.join([var_names[i] if binary[i] == '1' else var_names[i] + "'" 
                        for i in range(num_vars)])
         terms.append(term)
     
-    return ' + '.join(terms)
+    result = ' + '.join(terms)
+    if len(minterms) > cap:
+        result += f' + ... ({len(minterms) - cap} more terms)'
+    return result
 
 
 def generate_canonical_pos(maxterms, num_vars, var_names):
-    """Generate canonical Product of Sums"""
+    """Generate canonical Product of Sums (capped for large problems)"""
     if not maxterms:
         return "1"
     
+    cap = _MAX_TABLE_ROWS
     terms = []
-    for m in maxterms:
+    for m in maxterms[:cap]:
         binary = format(m, f'0{num_vars}b')
         term_parts = [var_names[i] if binary[i] == '0' else var_names[i] + "'" 
                      for i in range(num_vars)]
         terms.append('(' + ' + '.join(term_parts) + ')')
     
-    return ''.join(terms)
+    result = ''.join(terms)
+    if len(maxterms) > cap:
+        result += f'... ({len(maxterms) - cap} more terms)'
+    return result
 
 
 def generate_minimal_pos(maxterms, num_vars, var_names, dont_cares=[]):
-    """Generate minimal POS using Quine-McCluskey on maxterms"""
+    """Generate minimal POS using Quine-McCluskey on maxterms (fast greedy mode)"""
     if not maxterms:
         return "1"
 
-    qm = QuineMcCluskey(num_vars, maxterms, dont_cares)
-    _, _, _, selected_compat = qm.minimize(var_names)
+    # For very large problems (>10 vars), skip minimal POS optimization 
+    # to maintain sub-second latency/responsiveness.
+    # The maxterm set becomes too large (2^11 = 2048+) for even greedy QM to be fast enough
+    if num_vars > 10 or len(maxterms) > 256:
+        return generate_canonical_pos(maxterms, num_vars, var_names)
 
-    if not selected_compat:
+    # For POS, we run QM on the maxterms but always use greedy covering
+    # to avoid the exponential cost of branch-and-bound on the (often larger) maxterm set
+    qm = BitSliceQuineMcCluskey(num_vars, maxterms, dont_cares)
+    prime_implicants = qm.find_prime_implicants()
+
+    if not prime_implicants:
         return "1"
 
+    # Greedy covering — always O(n*m), no exponential branch-and-bound
+    minterm_bitmask = 0
+    for m in qm.minterms:
+        minterm_bitmask |= (1 << qm.term_to_idx[m])
+
+    remaining = minterm_bitmask
+    selected = []
+
+    # Sort PIs by coverage count descending for greedy selection
+    scored = []
+    for value, mask, mints_bm in prime_implicants:
+        cover = mints_bm & minterm_bitmask
+        scored.append((value, mask, mints_bm, cover, cover.bit_count()))
+    scored.sort(key=lambda x: x[4], reverse=True)
+
+    while remaining:
+        # Pick PI that covers the most uncovered minterms
+        best = None
+        best_count = 0
+        for item in scored:
+            c = (item[3] & remaining).bit_count()
+            if c > best_count:
+                best_count = c
+                best = item
+        if best is None or best_count == 0:
+            break
+        selected.append(best)
+        remaining &= ~best[3]
+        scored.remove(best)
+
     expression_terms = []
-    for term, _ in selected_compat:
+    for value, mask, mints_bm, _, _ in selected:
+        binary_str = qm.implicant_to_binary(value, mask)
         term_parts = []
-        for i, bit in enumerate(term):
+        for i, bit in enumerate(binary_str):
             if bit == '0':
                 term_parts.append(var_names[i])
             elif bit == '1':
@@ -536,46 +668,57 @@ def generate_minimal_pos(maxterms, num_vars, var_names, dont_cares=[]):
     return ''.join(expression_terms) if expression_terms else "1"
 
 
+def _output_name(var_names, num_vars):
+    """Pick an output name that doesn't collide with any input variable."""
+    used = set(var_names[:num_vars])
+    for candidate in ["F", "Y", "Out", "Z", "Q"]:
+        if candidate not in used:
+            return candidate
+    return "F_out"
+
+
 def generate_truth_table(num_vars, minterms, dont_cares, var_names):
     minterm_set = set(minterms)
     dc_set = set(dont_cares)
+    out = _output_name(var_names, num_vars)
+    total = 2 ** num_vars
+    cap = min(total, _MAX_TABLE_ROWS)
     table = []
-    for i in range(2 ** num_vars):
+    for i in range(cap):
         binary = format(i, f'0{num_vars}b')
         row = {var_names[j]: int(binary[j]) for j in range(num_vars)}
 
         if i in minterm_set:
-            row['F'] = 1
+            row[out] = 1
         elif i in dc_set:
-            row['F'] = 'X'
+            row[out] = 'X'
         else:
-            row['F'] = 0
+            row[out] = 0
 
         row['minterm'] = i
         table.append(row)
 
-    return table
+    return table, out, total
 
 
-def generate_waveform_data(truth_table, num_vars, var_names):
-    """Generate GTKWave-style waveform data"""
+def generate_waveform_data(truth_table, num_vars, var_names, out_name):
+    """Generate GTKWave-style waveform data (capped for rendering performance)"""
     signals = {}
-    
-    # Initialize signals
     for var in var_names[:num_vars]:
         signals[var] = []
-    signals['F'] = []
-    
-    # Generate waveform for each time step
-    for i, row in enumerate(truth_table):
+    signals[out_name] = []
+
+    cap = min(len(truth_table), _MAX_WAVEFORM_STEPS)
+    for i in range(cap):
+        row = truth_table[i]
         for var in var_names[:num_vars]:
             signals[var].append(row[var])
-        signals['F'].append(1 if row['F'] == 1 else (0 if row['F'] == 0 else 0))
-    
+        signals[out_name].append(1 if row[out_name] == 1 else 0)
+
     return {
         "signals": signals,
-        "time_steps": len(truth_table),
-        "signal_names": var_names[:num_vars] + ['F']
+        "time_steps": cap,
+        "signal_names": var_names[:num_vars] + [out_name]
     }
 
 
@@ -620,7 +763,7 @@ def sop_to_verilog(expression, num_vars, var_names):
     return " | ".join(verilog_terms)
 
 
-def generate_verilog_behavioral(expression, num_vars, var_names):
+def generate_verilog_behavioral(expression, num_vars, var_names, out_name='F'):
     """Generate behavioral Verilog with optimized formatting for large expressions"""
     verilog_expr = sop_to_verilog(expression, num_vars, var_names)
 
@@ -652,22 +795,22 @@ def generate_verilog_behavioral(expression, num_vars, var_names):
         input_decl = ',\n    input '.join(input_lines)
         code = f"""module kmap_behavioral(
     input {input_decl},
-    output reg F
+    output reg {out_name}
 );
 
 always @(*) begin
-    F = {formatted_expr};
+    {out_name} = {formatted_expr};
 end
 
 endmodule"""
     else:
         code = f"""module kmap_behavioral(
     input {inputs},
-    output reg F
+    output reg {out_name}
 );
 
 always @(*) begin
-    F = {formatted_expr};
+    {out_name} = {formatted_expr};
 end
 
 endmodule"""
@@ -675,7 +818,7 @@ endmodule"""
     return code
 
 
-def generate_verilog_dataflow(expression, num_vars, var_names):
+def generate_verilog_dataflow(expression, num_vars, var_names, out_name='F'):
     """Generate dataflow Verilog with optimized formatting for large expressions"""
     verilog_expr = sop_to_verilog(expression, num_vars, var_names)
 
@@ -707,26 +850,26 @@ def generate_verilog_dataflow(expression, num_vars, var_names):
         input_decl = ',\n    input '.join(input_lines)
         code = f"""module kmap_dataflow(
     input {input_decl},
-    output F
+    output {out_name}
 );
 
-    assign F = {formatted_expr};
+    assign {out_name} = {formatted_expr};
 
 endmodule"""
     else:
         code = f"""module kmap_dataflow(
     input {inputs},
-    output F
+    output {out_name}
 );
 
-    assign F = {formatted_expr};
+    assign {out_name} = {formatted_expr};
 
 endmodule"""
 
     return code
 
 
-def generate_verilog_gate_level(selected_pis, num_vars, var_names):
+def generate_verilog_gate_level(selected_pis, num_vars, var_names, out_name='F'):
     """
     Generate gate-level Verilog with optimized formatting for large circuits.
     For circuits with many gates, uses hierarchical wire declarations.
@@ -777,9 +920,9 @@ def generate_verilog_gate_level(selected_pis, num_vars, var_names):
 
     # OR gate for final output
     if len(wires) == 0:
-        or_gate = "    assign F = 1'b0;"
+        or_gate = f"    assign {out_name} = 1'b0;"
     elif len(wires) == 1:
-        or_gate = f"    assign F = {wires[0]};"
+        or_gate = f"    assign {out_name} = {wires[0]};"
     else:
         # Handle large OR gates (>8 inputs) with hierarchical structure
         if len(wires) > 8:
@@ -791,9 +934,9 @@ def generate_verilog_gate_level(selected_pis, num_vars, var_names):
                 gates.append(f"    wire {temp_wire};")
                 gates.append(f"    or o{chunk_idx//4}({temp_wire}, {', '.join(chunk)});")
 
-            or_gate = f"    or o_final(F, {', '.join(temp_or_wires)});"
+            or_gate = f"    or o_final({out_name}, {', '.join(temp_or_wires)});"
         else:
-            or_gate = f"    or o1(F, {', '.join(wires)});"
+            or_gate = f"    or o1({out_name}, {', '.join(wires)});"
 
     # Formatted wire declarations (handle long lists)
     if len(not_wires) > 10:
@@ -827,7 +970,7 @@ def generate_verilog_gate_level(selected_pis, num_vars, var_names):
         input_decl = ',\n    input '.join(input_lines)
         code = f"""module kmap_gate_level(
     input {input_decl},
-    output F
+    output {out_name}
 );
 
 {not_wire_decl}
@@ -840,7 +983,7 @@ endmodule"""
     else:
         code = f"""module kmap_gate_level(
     input {inputs},
-    output F
+    output {out_name}
 );
 
 {not_wire_decl}
@@ -854,7 +997,7 @@ endmodule"""
     return code
 
 
-def generate_verilog_testbench(num_vars, var_names, truth_table):
+def generate_verilog_testbench(num_vars, var_names, truth_table, out_name='F'):
     """
     Generate Verilog testbench with optimizations for large truth tables.
     For >8 variables, uses file-based test vector loading for efficiency.
@@ -872,7 +1015,7 @@ def generate_verilog_testbench(num_vars, var_names, truth_table):
     test_cases = []
     for row in test_table:
         input_vals = ''.join([str(row[var]) for var in var_names[:num_vars]])
-        output_val = '1' if row['F'] == 1 else ('x' if row['F'] == 'X' else '0')
+        output_val = '1' if row[out_name] == 1 else ('x' if row[out_name] == 'X' else '0')
         test_cases.append(f"        test_vectors[{len(test_cases)}] = {{{len(var_names[:num_vars])}'b{input_vals}, 1'b{output_val}}};")
 
     # Format test case initialization
@@ -892,17 +1035,17 @@ def generate_verilog_testbench(num_vars, var_names, truth_table):
         port_conn = ',\n        '.join([', '.join(chunk) for chunk in port_chunks])
         dut_inst = f"""kmap_dataflow dut(
         {port_conn},
-        .F(F)
+        .{out_name}({out_name})
     );"""
     else:
         dut_inst = f"""kmap_dataflow dut(
         {', '.join([f'.{v}({v})' for v in var_names[:num_vars]])},
-        .F(F)
+        .{out_name}({out_name})
     );"""
 
     code = f"""module kmap_tb;
     {reg_decl}
-    wire F;
+    wire {out_name};
 
     {truncate_note}
     // Instantiate the design under test
@@ -922,8 +1065,8 @@ def generate_verilog_testbench(num_vars, var_names, truth_table):
         for (i = 0; i < {len(test_table)}; i = i + 1) begin
             {{{', '.join(var_names[:num_vars])}}} = test_vectors[i][{num_vars}:1];
             #10;
-            $display(\"{' '.join(['%b' for _ in var_names[:num_vars]])} | F=%b (expected=%b)\",
-                {', '.join(var_names[:num_vars])}, F, test_vectors[i][0]);
+            $display(\"{' '.join(['%b' for _ in var_names[:num_vars]])} | {out_name}=%b (expected=%b)\",
+                {', '.join(var_names[:num_vars])}, {out_name}, test_vectors[i][0]);
         end
 
         $finish;
@@ -933,15 +1076,15 @@ endmodule"""
     return code
 
 
-def generate_simulation_output(truth_table, num_vars, var_names):
+def generate_simulation_output(truth_table, num_vars, var_names, out_name='F'):
     output_lines = ["VVP Simulation Output:"]
     output_lines.append("=" * 50)
-    output_lines.append(f"{' '.join(var_names[:num_vars])} | F | Expected")
+    output_lines.append(f"{' '.join(var_names[:num_vars])} | {out_name} | Expected")
     output_lines.append("-" * 50)
-    
+
     for row in truth_table:
         input_vals = ' '.join([str(row[var]) for var in var_names[:num_vars]])
-        output_val = row['F']
+        output_val = row[out_name]
         expected = '1' if output_val == 1 else ('X' if output_val == 'X' else '0')
         status = "✓" if output_val != 'X' else "(don't care)"
         output_lines.append(f"{input_vals} | {output_val} | {expected} {status}")
@@ -965,7 +1108,7 @@ def generate_kmap_groups(selected_pis, num_vars):
 
 
 @api_router.post("/minimize", response_model=MinimizeResponse)
-async def minimize_kmap(request: MinimizeRequest):
+def minimize_kmap(request: MinimizeRequest):
     try:
         start_time = time.perf_counter()
         timings = {}
@@ -996,6 +1139,31 @@ async def minimize_kmap(request: MinimizeRequest):
 
         var_names = request.variable_names[:request.num_vars]
 
+        # Fast path: all possible values are minterms → F = 1
+        if len(minterms) >= max_val:
+            truth_table, out_name, total_rows = generate_truth_table(
+                request.num_vars, minterms, request.dont_cares, var_names)
+            total_time = (time.perf_counter() - start_time) * 1000
+            return MinimizeResponse(
+                truth_table=truth_table, prime_implicants=[],
+                essential_prime_implicants=[], minimal_sop="1", minimal_pos="1",
+                canonical_sop=generate_canonical_sop(minterms, request.num_vars, var_names),
+                canonical_pos="1", groups=[],
+                verilog_behavioral=generate_verilog_behavioral("1", request.num_vars, var_names, out_name),
+                verilog_dataflow=generate_verilog_dataflow("1", request.num_vars, var_names, out_name),
+                verilog_gate_level=generate_verilog_gate_level([], request.num_vars, var_names, out_name),
+                verilog_testbench=generate_verilog_testbench(request.num_vars, var_names, truth_table, out_name),
+                simulation_output=generate_simulation_output(truth_table, request.num_vars, var_names, out_name),
+                waveform_data=generate_waveform_data(truth_table, request.num_vars, var_names, out_name),
+                steps=["All minterms present — function is identically 1"],
+                performance_metrics={
+                    "total_time_ms": round(total_time, 2), "num_variables": request.num_vars,
+                    "num_minterms": len(minterms), "num_prime_implicants": 0,
+                    "num_essential_pis": 0, "num_selected_pis": 0,
+                    "truth_table_size": total_rows, "algorithm": "Trivial (constant 1)",
+                    "optimization_level": "N/A", "timings": {}},
+                output_name=out_name)
+
         # Run Quine-McCluskey for SOP
         t0 = time.perf_counter()
         qm = QuineMcCluskey(request.num_vars, minterms, request.dont_cares)
@@ -1015,7 +1183,7 @@ async def minimize_kmap(request: MinimizeRequest):
 
         # Generate outputs
         t0 = time.perf_counter()
-        truth_table = generate_truth_table(request.num_vars, minterms, request.dont_cares, var_names)
+        truth_table, out_name, total_rows = generate_truth_table(request.num_vars, minterms, request.dont_cares, var_names)
         timings['truth_table_generation'] = (time.perf_counter() - t0) * 1000  # ms
 
         pi_list = [{
@@ -1031,14 +1199,14 @@ async def minimize_kmap(request: MinimizeRequest):
 
         # Verilog generation
         t0 = time.perf_counter()
-        verilog_behavioral = generate_verilog_behavioral(minimal_sop, request.num_vars, var_names)
-        verilog_dataflow = generate_verilog_dataflow(minimal_sop, request.num_vars, var_names)
-        verilog_gate_level = generate_verilog_gate_level(selected_pis, request.num_vars, var_names)
-        verilog_testbench = generate_verilog_testbench(request.num_vars, var_names, truth_table)
+        verilog_behavioral = generate_verilog_behavioral(minimal_sop, request.num_vars, var_names, out_name)
+        verilog_dataflow = generate_verilog_dataflow(minimal_sop, request.num_vars, var_names, out_name)
+        verilog_gate_level = generate_verilog_gate_level(selected_pis, request.num_vars, var_names, out_name)
+        verilog_testbench = generate_verilog_testbench(request.num_vars, var_names, truth_table, out_name)
         timings['verilog_generation'] = (time.perf_counter() - t0) * 1000  # ms
 
-        simulation_output = generate_simulation_output(truth_table, request.num_vars, var_names)
-        waveform_data = generate_waveform_data(truth_table, request.num_vars, var_names)
+        simulation_output = generate_simulation_output(truth_table, request.num_vars, var_names, out_name)
+        waveform_data = generate_waveform_data(truth_table, request.num_vars, var_names, out_name)
 
         total_time = (time.perf_counter() - start_time) * 1000  # ms
 
@@ -1051,7 +1219,7 @@ async def minimize_kmap(request: MinimizeRequest):
             "num_prime_implicants": len(prime_implicants),
             "num_essential_pis": len(essential_pis),
             "num_selected_pis": len(selected_pis),
-            "truth_table_size": len(truth_table),
+            "truth_table_size": total_rows,
             "algorithm": "BitSlice QM with Branch-and-Bound",
             "optimization_level": "High (bitwise operations, advanced column covering)"
         }
@@ -1072,7 +1240,8 @@ async def minimize_kmap(request: MinimizeRequest):
             simulation_output=simulation_output,
             waveform_data=waveform_data,
             steps=qm.steps,
-            performance_metrics=performance_metrics
+            performance_metrics=performance_metrics,
+            output_name=out_name
         )
 
     except Exception as e:
@@ -1103,6 +1272,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
